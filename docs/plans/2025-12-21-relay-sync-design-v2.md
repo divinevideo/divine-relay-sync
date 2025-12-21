@@ -63,37 +63,65 @@ A Rust CLI tool to sync Nostr events from one relay to another, with smart pagin
 
 ### The Correct Flow
 
-NIP-77 negentropy is **set reconciliation** - it efficiently finds the diff between two sets without transferring all IDs.
+NIP-77 negentropy is **set reconciliation** - it efficiently finds the diff between two sets without transferring all IDs. The **client acts as a message proxy** between two relay-side negentropy instances.
 
 **For relay-to-relay sync:**
 
 ```
 1. DISCOVER CAPABILITIES
-   ├── Query source relay NIP-11 info document
+   ├── Query source relay NIP-11 info document (with 5s timeout, cache result)
    ├── Query dest relay NIP-11 info document
-   └── Check supported_nips for NIP-77 (negentropy)
+   ├── Check supported_nips for NIP-77 (negentropy)
+   └── Extract max_negentropy_items limit if available
 
-2. RECONCILIATION (if both support negentropy)
-   ├── Open NEG-OPEN to SOURCE with filter
-   │   → Build local negentropy model from source's events
-   ├── Open NEG-OPEN to DEST with same filter
-   │   → Build local negentropy model from dest's events
-   ├── Run local negentropy reconciliation
-   │   → Computes: source_set MINUS dest_set = missing_ids
-   └── Result: List of event IDs missing from dest
+2. RECONCILIATION (if BOTH relays support negentropy)
+   ┌─────────────────────────────────────────────────────────────┐
+   │ Client acts as MESSAGE PROXY between source and dest       │
+   │                                                             │
+   │  SOURCE                  CLIENT                  DEST       │
+   │    │                       │                       │        │
+   │    │◄─── NEG-OPEN ────────│                       │        │
+   │    │     (filter)          │                       │        │
+   │    │                       │                       │        │
+   │    │──── NEG-MSG ────────►│                       │        │
+   │    │     (source set)      │                       │        │
+   │    │                       │─── NEG-OPEN ────────►│        │
+   │    │                       │    (filter + msg)     │        │
+   │    │                       │                       │        │
+   │    │                       │◄─── NEG-MSG ─────────│        │
+   │    │                       │     (dest set)        │        │
+   │    │◄─── NEG-MSG ─────────│                       │        │
+   │    │     (forward)         │                       │        │
+   │    │                       │                       │        │
+   │    │──── NEG-MSG ────────►│ (iterate until done)  │        │
+   │    ...                    ...                     ...       │
+   │    │                       │                       │        │
+   │    │◄─── HAVE/NEED ───────│ (final result)        │        │
+   │    │     IDs               │                       │        │
+   └─────────────────────────────────────────────────────────────┘
+
+   Result: Client receives event IDs that source has but dest lacks
 
 3. RECONCILIATION (if only source supports negentropy)
    ├── Open NEG-OPEN to SOURCE with filter
-   │   → Get all event IDs from source via negentropy
-   ├── Query DEST with standard REQ (batched by ID)
-   │   → Check which events dest already has
-   └── Result: List of event IDs to sync
+   │   → Enumerate all event IDs via negentropy reconciliation
+   ├── For each batch of IDs, query DEST with REQ (ids: [...])
+   │   → Relays return events they have; missing = need to sync
+   └── Result: List of event IDs to fetch from source
 
-4. FALLBACK (timestamp pagination)
-   ├── Use since/until + LIMIT filters on SOURCE
-   ├── Paginate by created_at cursor
+4. FALLBACK (timestamp pagination - neither supports negentropy)
+   ├── Use LIMIT + cursor-based pagination on SOURCE
+   ├── Track position by (created_at, event_id) tuple
    └── Publish all to dest (let dest dedupe)
+
+5. ERROR HANDLING
+   ├── NEG-ERR "BLOCKED" → Immediately fall back to timestamp mode
+   ├── NEG-ERR "CLOSED"  → Restart NEG-OPEN handshake
+   ├── Connection drop   → Restart from NEG-OPEN (subscription invalid)
+   └── Too many IDs      → Batch into chunks of 500 for REQ
 ```
+
+**Important:** On reconnection during negentropy exchange, the subscription ID is invalidated. Must restart from NEG-OPEN, not resume mid-exchange.
 
 ### NIP-77 Message Protocol
 
@@ -203,10 +231,16 @@ async fn run_sync(shutdown: CancellationToken) -> Result<()> {
     shutdown.cancel();
 
     // Wait for tasks with timeout
-    tokio::time::timeout(
+    // Use join! (not try_join!) so publisher can drain even if fetcher fails
+    let result = tokio::time::timeout(
         Duration::from_secs(30),
-        async { tokio::try_join!(fetcher, publisher) }
-    ).await??;
+        async {
+            let (fetch_result, publish_result) = tokio::join!(fetcher, publisher);
+            fetch_result??;
+            publish_result??;
+            Ok::<_, anyhow::Error>(())
+        }
+    ).await;
 
     Ok(())
 }
@@ -572,17 +606,21 @@ impl AdaptivePublisher {
     }
 
     fn increase_rate(&self) {
-        let current = self.current_rate.load(Ordering::Relaxed);
-        let new_rate = (current + current / 10).min(self.max_rate); // +10%
-        self.current_rate.store(new_rate, Ordering::Relaxed);
-        self.update_limiter(new_rate);
+        // Atomic read-modify-write to avoid race conditions
+        self.current_rate.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            let new_rate = (current + current / 10).min(self.max_rate); // +10%
+            Some(new_rate)
+        }).ok();
+        self.update_limiter(self.current_rate.load(Ordering::Relaxed));
     }
 
     fn decrease_rate(&self) {
-        let current = self.current_rate.load(Ordering::Relaxed);
-        let new_rate = (current / 2).max(self.min_rate); // Halve on error
-        self.current_rate.store(new_rate, Ordering::Relaxed);
-        self.update_limiter(new_rate);
+        // Atomic read-modify-write to avoid race conditions
+        self.current_rate.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            let new_rate = (current / 2).max(self.min_rate); // Halve on error
+            Some(new_rate)
+        }).ok();
+        self.update_limiter(self.current_rate.load(Ordering::Relaxed));
     }
 }
 ```
@@ -619,8 +657,13 @@ relay-sync source dest --retry-failures    # Retry only failed events
 relay-sync source dest --dry-run           # Show what would sync (no publish)
 relay-sync source dest --quiet             # Minimal output
 relay-sync source dest --json              # Machine-readable output
-relay-sync source dest --nsec "nsec1..."   # Auth key for private relays
+relay-sync source dest --nsec "nsec1..."   # Auth key (prefer env var)
+relay-sync source dest --verbose          # Detailed debug logs
 ```
+
+**Security note:** Avoid `--nsec` on command line (visible in `ps aux`). Prefer:
+- Environment variable: `RELAY_SYNC_NSEC=nsec1... relay-sync ...`
+- Config file with restricted permissions (chmod 600)
 
 ### Dry Run Behavior
 
@@ -759,6 +802,26 @@ thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"  # For state file hashing
 ```
+
+## Security Considerations
+
+1. **Private key handling** - nsec via env var preferred over CLI arg (process visible). Config file should have 0600 permissions.
+
+2. **State file permissions** - Create `.relay-sync-state/` with mode 0700 (owner-only). Event IDs can leak usage patterns.
+
+3. **Relay trust model** - Relays are assumed non-malicious. No protection against relay sending infinite NEG-MSG or malformed events. nostr-sdk validates signatures.
+
+4. **Event validation** - nostr-sdk validates event signatures and ID hashes before publishing. Invalid events from source are skipped.
+
+## Known Limitations
+
+1. **Same-timestamp pagination inefficiency** - Events with identical `created_at` are filtered client-side after fetch. If many events share a timestamp, this wastes bandwidth. Acceptable for typical Nostr usage patterns.
+
+2. **Event ordering in channel** - Events may arrive out of order from multiple fetcher batches. State checkpoint uses event timestamp, so some events may be re-fetched on crash. Dest relay dedupes, so no data loss.
+
+3. **Memory for large syncs** - Negentropy results (event IDs) stored in memory. 1M events = ~32MB IDs. Acceptable for typical usage.
+
+4. **Clock skew** - Source relay with future timestamps may cause events to appear "old" later. Mitigated by event ID tiebreaker in cursor.
 
 ## Design Decisions
 
