@@ -92,14 +92,27 @@ async fn main() -> Result<()> {
         shutdown_clone.cancel();
     });
 
+    // Parse date ranges
+    let since = if let Some(ref s) = cli.since {
+        Some(relay_sync::cli::parse_date(s).map_err(|e| anyhow::anyhow!(e))?)
+    } else {
+        None
+    };
+
+    let until = if let Some(ref s) = cli.until {
+        Some(relay_sync::cli::parse_date(s).map_err(|e| anyhow::anyhow!(e))?)
+    } else {
+        None
+    };
+
     // Create sync options
     let options = SyncOptions {
         source_url: source_url.clone(),
         dest_url: dest_url.clone(),
         kinds,
         authors,
-        since: None, // TODO: parse from CLI
-        until: None, // TODO: parse from CLI
+        since,
+        until,
         fresh: cli.fresh,
         dry_run: cli.dry_run,
         nsec,
