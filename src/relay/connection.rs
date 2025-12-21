@@ -106,7 +106,17 @@ impl RelayConnection {
             Client::default()
         };
 
-        client.add_relay(url).await.map_err(|e| {
+        // Configure relay options for persistent connections
+        let relay_opts = RelayOptions::new()
+            .ping(false)  // Disable ping - some relays don't respond
+            .reconnect(true);  // Auto-reconnect on disconnect
+
+        // Use pool directly to set custom options
+        let relay_url = RelayUrl::parse(url).map_err(|e| {
+            Error::with_source(ErrorKind::ConfigError, format!("invalid relay URL: {}", url), e)
+        })?;
+
+        client.pool().add_relay(relay_url, relay_opts).await.map_err(|e| {
             Error::with_source(ErrorKind::NetworkError, format!("failed to add relay {}", url), e)
         })?;
 

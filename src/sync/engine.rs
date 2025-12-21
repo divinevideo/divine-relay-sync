@@ -184,34 +184,36 @@ impl SyncEngine {
             if self.options.dry_run {
                 debug!("DRY RUN: Would publish event {}", event.id);
                 events_synced += 1;
-            } else {
-                match publish_event(dest.client(), &event, Some(&rate_limiter)).await {
-                    Ok(true) => {
-                        debug!("Published event {}", event.id);
-                        events_synced += 1;
-                    }
-                    Ok(false) => {
-                        debug!("Event {} already exists (duplicate)", event.id);
-                        events_skipped += 1;
-                    }
-                    Err(e) => {
-                        warn!("Failed to publish event {}: {}", event.id, e);
-                        events_failed += 1;
+                // Don't update state in dry run mode
+                continue;
+            }
 
-                        // Log failure
-                        let _ = self.state_manager.log_failure(
-                            &self.options.source_url,
-                            &self.options.dest_url,
-                            &self.options.kinds,
-                            &self.options.authors,
-                            &event.id.to_hex(),
-                            &e.message,
-                        );
-                    }
+            match publish_event(dest.client(), &event, Some(&rate_limiter)).await {
+                Ok(true) => {
+                    debug!("Published event {}", event.id);
+                    events_synced += 1;
+                }
+                Ok(false) => {
+                    debug!("Event {} already exists (duplicate)", event.id);
+                    events_skipped += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to publish event {}: {}", event.id, e);
+                    events_failed += 1;
+
+                    // Log failure
+                    let _ = self.state_manager.log_failure(
+                        &self.options.source_url,
+                        &self.options.dest_url,
+                        &self.options.kinds,
+                        &self.options.authors,
+                        &event.id.to_hex(),
+                        &e.message,
+                    );
                 }
             }
 
-            // Update cursor
+            // Update cursor (only for real syncs, not dry run)
             state.update_cursor(event.created_at.as_u64() as i64, event.id.to_hex());
             state.increment_events(1);
 
@@ -230,9 +232,13 @@ impl SyncEngine {
             warn!("Fetcher task failed: {}", e);
         }
 
-        // Final state save
-        info!("Saving final state");
-        self.state_manager.save(&state)?;
+        // Final state save (skip in dry run mode)
+        if !self.options.dry_run {
+            info!("Saving final state");
+            self.state_manager.save(&state)?;
+        } else {
+            info!("Dry run complete, state not saved");
+        }
 
         // Disconnect from relays
         source.disconnect().await;
