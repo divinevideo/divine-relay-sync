@@ -1,0 +1,50 @@
+[package]
+name = "relay-sync"
+version = "0.1.0"
+edition = "2021"
+description = "Sync Nostr events between relays using NIP-77 negentropy"
+license = "MIT"
+
+[[bin]]
+name = "relay-sync"
+path = "src/main.rs"
+
+[dependencies]
+# Nostr
+nostr-sdk = "0.37"
+
+# Async runtime
+tokio = { version = "1", features = ["full", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Config
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Output
+indicatif = "0.17"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Rate limiting
+governor = "0.6"
+nonzero_ext = "0.3"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+url = "2"
+hostname = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
