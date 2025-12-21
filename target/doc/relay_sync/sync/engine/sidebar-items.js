@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"enum":["SyncMode"],"struct":["SyncEngine","SyncOptions","SyncResult"]};
