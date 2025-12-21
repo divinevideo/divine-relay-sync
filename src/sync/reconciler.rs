@@ -5,7 +5,7 @@ use crate::error::{Error, ErrorKind, Result};
 use nostr_sdk::prelude::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Reconcile using Client directly
 /// Returns number of events found that need syncing

@@ -77,10 +77,10 @@ impl SyncEngine {
 
         // Determine sync mode
         let mode = if source.info.supports_negentropy && dest.info.supports_negentropy {
-            info!("Using negentropy mode (not yet implemented, falling back to timestamp)");
-            SyncMode::Timestamp
+            info!("Both relays support negentropy, using NIP-77 sync");
+            SyncMode::Negentropy
         } else {
-            info!("Using timestamp mode");
+            info!("Using timestamp-based sync (negentropy not supported by both relays)");
             SyncMode::Timestamp
         };
 
@@ -115,21 +115,53 @@ impl SyncEngine {
         let filter = self.build_filter(&state);
         debug!("Filter: {:?}", filter);
 
-        // Spawn fetcher task
-        let fetcher_source = source.client().clone();
-        let fetcher_shutdown = self.shutdown.clone();
-        let fetcher_state_cursor = state.cursor_created_at;
+        // Spawn fetcher/reconciler task based on mode
+        let fetcher_handle = match mode {
+            SyncMode::Negentropy => {
+                let source_client = source.client().clone();
+                let source_url = self.options.source_url.clone();
+                let filter_clone = filter.clone();
+                let tx_clone = tx;
+                let shutdown_clone = self.shutdown.clone();
 
-        let fetcher_handle = tokio::spawn(async move {
-            fetch_events(
-                fetcher_source,
-                filter,
-                fetcher_state_cursor,
-                tx,
-                fetcher_shutdown,
-            )
-            .await
-        });
+                tokio::spawn(async move {
+                    let result = super::reconciler::reconcile_with_client(
+                        &source_client,
+                        &source_url,
+                        filter_clone,
+                        tx_clone,
+                        shutdown_clone,
+                    ).await;
+
+                    match result {
+                        Ok(count) => {
+                            info!("Negentropy found {} events", count);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            warn!("Negentropy error: {}", e);
+                            Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                        }
+                    }
+                })
+            }
+            SyncMode::Timestamp => {
+                let fetcher_source = source.client().clone();
+                let fetcher_shutdown = self.shutdown.clone();
+                let fetcher_state_cursor = state.cursor_created_at;
+
+                tokio::spawn(async move {
+                    fetch_events(
+                        fetcher_source,
+                        filter,
+                        fetcher_state_cursor,
+                        tx,
+                        fetcher_shutdown,
+                    )
+                    .await
+                })
+            }
+        };
 
         // Track results
         let mut events_synced = 0u64;
