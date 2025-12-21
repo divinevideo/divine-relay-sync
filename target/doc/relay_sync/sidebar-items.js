@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["cli","config","error","output","relay","state","sync"]};
