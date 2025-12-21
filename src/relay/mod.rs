@@ -5,3 +5,4 @@ pub mod connection;
 pub mod auth;
 
 pub use connection::{RelayConnection, RelayInfo};
+pub use auth::Authenticator;
