@@ -2,6 +2,7 @@
 // ABOUTME: Publishes events to destination relay with exponential backoff
 
 use crate::error::{Error, ErrorKind, Result};
+use crate::sync::RateLimiter;
 use nostr_sdk::prelude::*;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -11,7 +12,12 @@ const INITIAL_BACKOFF_MS: u64 = 100;
 
 /// Publish an event to the destination relay
 /// Returns Ok(true) if published, Ok(false) if duplicate, Err on failure
-pub async fn publish_event(client: &Client, event: &Event) -> Result<bool> {
+pub async fn publish_event(client: &Client, event: &Event, rate_limiter: Option<&RateLimiter>) -> Result<bool> {
+    // Wait for rate limiter permission if provided
+    if let Some(limiter) = rate_limiter {
+        limiter.wait().await;
+    }
+
     let mut retries = 0;
     let mut backoff_ms = INITIAL_BACKOFF_MS;
 
@@ -31,6 +37,13 @@ pub async fn publish_event(client: &Client, event: &Event) -> Result<bool> {
                             if kind == ErrorKind::Duplicate {
                                 debug!("Event {} is duplicate", event.id);
                                 return Ok(false);
+                            }
+
+                            // Handle rate limiting feedback
+                            if kind == ErrorKind::RateLimited {
+                                if let Some(limiter) = rate_limiter {
+                                    limiter.record_rate_limited();
+                                }
                             }
 
                             // Check if we should retry
@@ -61,6 +74,9 @@ pub async fn publish_event(client: &Client, event: &Event) -> Result<bool> {
 
                 // Event was accepted
                 debug!("Event {} published successfully", event.id);
+                if let Some(limiter) = rate_limiter {
+                    limiter.record_success();
+                }
                 return Ok(true);
             }
             Err(e) => {

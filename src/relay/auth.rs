@@ -51,4 +51,9 @@ impl Authenticator {
     pub fn public_key(&self) -> Option<PublicKey> {
         self.keys.as_ref().map(|k| k.public_key())
     }
+
+    /// Get the keys if available (for Client signer)
+    pub fn keys(&self) -> Option<&Keys> {
+        self.keys.as_ref()
+    }
 }

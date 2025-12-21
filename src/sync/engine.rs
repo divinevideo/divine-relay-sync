@@ -6,6 +6,7 @@ use crate::relay::connection::RelayConnection;
 use crate::state::{StateManager, SyncState};
 use crate::sync::fetcher::fetch_events;
 use crate::sync::publisher::publish_event;
+use crate::sync::RateLimiter;
 use nostr_sdk::prelude::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -137,6 +138,9 @@ impl SyncEngine {
         let mut checkpoint_counter = 0u64;
         const CHECKPOINT_INTERVAL: u64 = 100;
 
+        // Create rate limiter for adaptive rate limiting
+        let rate_limiter = RateLimiter::default();
+
         // Process events from channel
         while let Some(event) = rx.recv().await {
             if self.shutdown.is_cancelled() {
@@ -149,7 +153,7 @@ impl SyncEngine {
                 debug!("DRY RUN: Would publish event {}", event.id);
                 events_synced += 1;
             } else {
-                match publish_event(dest.client(), &event).await {
+                match publish_event(dest.client(), &event, Some(&rate_limiter)).await {
                     Ok(true) => {
                         debug!("Published event {}", event.id);
                         events_synced += 1;

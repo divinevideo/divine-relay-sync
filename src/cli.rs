@@ -2,6 +2,7 @@
 // ABOUTME: Supports positional args, filters, and control flags
 
 use clap::Parser;
+use chrono::{NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 #[derive(Parser, Debug)]
 #[command(name = "relay-sync")]
@@ -78,6 +79,28 @@ pub fn normalize_relay_url(url: &str) -> String {
     } else {
         format!("wss://{}", url)
     }
+}
+
+/// Parse date string into Unix timestamp
+/// Supports: YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS, or raw timestamp
+pub fn parse_date(s: &str) -> Result<i64, String> {
+    // Try raw timestamp first
+    if let Ok(ts) = s.parse::<i64>() {
+        return Ok(ts);
+    }
+
+    // Try YYYY-MM-DDTHH:MM:SS
+    if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(Utc.from_utc_datetime(&dt).timestamp());
+    }
+
+    // Try YYYY-MM-DD
+    if let Ok(date) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        let dt = date.and_hms_opt(0, 0, 0).unwrap();
+        return Ok(Utc.from_utc_datetime(&dt).timestamp());
+    }
+
+    Err(format!("invalid date format: {}", s))
 }
 
 impl Cli {

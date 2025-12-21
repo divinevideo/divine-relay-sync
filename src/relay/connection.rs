@@ -2,6 +2,7 @@
 // ABOUTME: Handles WebSocket connection and NIP-11 discovery
 
 use crate::error::{Error, ErrorKind, Result};
+use crate::relay::auth::Authenticator;
 use nostr_sdk::prelude::*;
 use std::time::Duration;
 
@@ -68,28 +69,69 @@ pub struct RelayConnection {
     pub url: String,
     pub info: RelayInfo,
     client: Client,
+    authenticator: Option<Authenticator>,
 }
 
 impl RelayConnection {
     /// Connect to a relay
     pub async fn connect(url: &str) -> Result<Self> {
-        let info = RelayInfo::fetch(url).await.unwrap_or_else(|_| RelayInfo {
-            url: url.to_string(),
-            ..Default::default()
+        Self::connect_with_auth(url, None).await
+    }
+
+    /// Connect to a relay with authentication keys
+    pub async fn connect_with_auth(url: &str, nsec: Option<&str>) -> Result<Self> {
+        let info = RelayInfo::fetch(url).await.unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch NIP-11 info for {}: {}", url, e);
+            RelayInfo {
+                url: url.to_string(),
+                ..Default::default()
+            }
         });
 
-        let client = Client::default();
+        // Create authenticator if keys provided
+        let authenticator = if let Some(nsec) = nsec {
+            Some(Authenticator::new(Some(nsec))?)
+        } else {
+            None
+        };
+
+        // Create client with or without signer
+        let client = if let Some(ref auth) = authenticator {
+            if let Some(keys) = auth.keys() {
+                Client::new(keys.clone())
+            } else {
+                Client::default()
+            }
+        } else {
+            Client::default()
+        };
+
         client.add_relay(url).await.map_err(|e| {
             Error::with_source(ErrorKind::NetworkError, format!("failed to add relay {}", url), e)
         })?;
 
         client.connect().await;
 
+        // Check if auth is required and we can authenticate
+        if info.auth_required {
+            if authenticator.is_none() {
+                tracing::warn!("Relay {} requires auth but no keys provided", url);
+            } else {
+                tracing::info!("Relay {} requires auth, keys available", url);
+            }
+        }
+
         Ok(Self {
             url: url.to_string(),
             info,
             client,
+            authenticator,
         })
+    }
+
+    /// Check if we can authenticate
+    pub fn can_authenticate(&self) -> bool {
+        self.authenticator.as_ref().map(|a| a.can_authenticate()).unwrap_or(false)
     }
 
     /// Get the underlying nostr-sdk client
