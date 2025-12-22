@@ -1672,6 +1672,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures",
  "governor",
  "hex",
  "hostname",

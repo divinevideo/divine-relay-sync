@@ -5,13 +5,15 @@ use crate::error::Result;
 use crate::relay::connection::RelayConnection;
 use crate::state::{StateManager, SyncState};
 use crate::sync::fetcher::fetch_events;
-use crate::sync::publisher::publish_event;
-use crate::sync::RateLimiter;
 use nostr_sdk::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+
+/// Maximum concurrent publish operations
+const MAX_CONCURRENT_PUBLISHES: usize = 200;
 
 /// Configuration options for sync operation
 #[derive(Debug, Clone)]
@@ -85,7 +87,7 @@ impl SyncEngine {
         };
 
         // Load or create state
-        let mut state = if self.options.fresh {
+        let state = if self.options.fresh {
             info!("Fresh sync requested, starting from scratch");
             SyncState::new(&self.options.source_url, &self.options.dest_url)
         } else {
@@ -163,74 +165,107 @@ impl SyncEngine {
             }
         };
 
-        // Track results
-        let mut events_synced = 0u64;
-        let mut events_skipped = 0u64;
-        let mut events_failed = 0u64;
-        let mut checkpoint_counter = 0u64;
-        const CHECKPOINT_INTERVAL: u64 = 100;
+        // Track results with atomics for concurrent access
+        let events_synced = Arc::new(AtomicU64::new(0));
+        let events_skipped = Arc::new(AtomicU64::new(0));
+        let events_failed = Arc::new(AtomicU64::new(0));
 
-        // Create rate limiter for adaptive rate limiting
-        let rate_limiter = RateLimiter::default();
+        // Semaphore to limit concurrent publishes
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PUBLISHES));
 
-        // Process events from channel
-        while let Some(event) = rx.recv().await {
-            if self.shutdown.is_cancelled() {
-                info!("Shutdown requested, stopping sync");
-                break;
-            }
+        // Clone for the publisher task
+        let dest_client = dest.client().clone();
+        let synced = events_synced.clone();
+        let skipped = events_skipped.clone();
+        let failed = events_failed.clone();
+        let shutdown = self.shutdown.clone();
+        let dry_run = self.options.dry_run;
 
-            // Publish event (or skip in dry-run mode)
-            if self.options.dry_run {
-                debug!("DRY RUN: Would publish event {}", event.id);
-                events_synced += 1;
-                // Don't update state in dry run mode
-                continue;
-            }
+        // Spawn publisher workers that pull from channel
+        let publisher_handle = tokio::spawn(async move {
+            let mut handles = Vec::new();
 
-            match publish_event(dest.client(), &event, Some(&rate_limiter)).await {
-                Ok(true) => {
-                    debug!("Published event {}", event.id);
-                    events_synced += 1;
+            while let Some(event) = rx.recv().await {
+                if shutdown.is_cancelled() {
+                    break;
                 }
-                Ok(false) => {
-                    debug!("Event {} already exists (duplicate)", event.id);
-                    events_skipped += 1;
-                }
-                Err(e) => {
-                    warn!("Failed to publish event {}: {}", event.id, e);
-                    events_failed += 1;
 
-                    // Log failure
-                    let _ = self.state_manager.log_failure(
-                        &self.options.source_url,
-                        &self.options.dest_url,
-                        &self.options.kinds,
-                        &self.options.authors,
-                        &event.id.to_hex(),
-                        &e.message,
+                // Dry run mode - just count
+                if dry_run {
+                    debug!("DRY RUN: Would publish event {}", event.id);
+                    synced.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+
+                // Acquire semaphore permit
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                let client = dest_client.clone();
+                let synced_clone = synced.clone();
+                let skipped_clone = skipped.clone();
+                let failed_clone = failed.clone();
+
+                // Spawn task for this event (fire and forget style)
+                let handle = tokio::spawn(async move {
+                    let _permit = permit; // Hold permit until done
+
+                    match client.send_event(event.clone()).await {
+                        Ok(output) => {
+                            if output.success.is_empty() {
+                                // Check for duplicate
+                                if let Some((_, reason)) = output.failed.iter().next() {
+                                    let msg = reason.as_ref().map(|s| s.as_str()).unwrap_or("");
+                                    if msg.contains("duplicate") || msg.contains("already have") {
+                                        skipped_clone.fetch_add(1, Ordering::Relaxed);
+                                        return;
+                                    }
+                                }
+                                failed_clone.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                synced_clone.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                        Err(_) => {
+                            failed_clone.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+                handles.push(handle);
+
+                // Log progress periodically (every 500 events spawned)
+                if handles.len() % 500 == 0 {
+                    let total = synced.load(Ordering::Relaxed)
+                        + skipped.load(Ordering::Relaxed)
+                        + failed.load(Ordering::Relaxed);
+                    info!(
+                        "Publishing: {} sent, {} completed ({} synced, {} skipped, {} failed)",
+                        handles.len(),
+                        total,
+                        synced.load(Ordering::Relaxed),
+                        skipped.load(Ordering::Relaxed),
+                        failed.load(Ordering::Relaxed)
                     );
                 }
             }
 
-            // Update cursor (only for real syncs, not dry run)
-            state.update_cursor(event.created_at.as_u64() as i64, event.id.to_hex());
-            state.increment_events(1);
-
-            // Checkpoint periodically
-            checkpoint_counter += 1;
-            if checkpoint_counter >= CHECKPOINT_INTERVAL {
-                debug!("Checkpointing state (synced: {}, cursor: {})",
-                    state.events_synced, event.created_at.as_u64());
-                self.state_manager.save(&state)?;
-                checkpoint_counter = 0;
+            // Wait for all remaining tasks
+            for handle in handles {
+                let _ = handle.await;
             }
-        }
+        });
 
         // Wait for fetcher to complete
         if let Err(e) = fetcher_handle.await {
             warn!("Fetcher task failed: {}", e);
         }
+
+        // Wait for publisher to complete
+        if let Err(e) = publisher_handle.await {
+            warn!("Publisher task failed: {}", e);
+        }
+
+        let final_synced = events_synced.load(Ordering::Relaxed);
+        let final_skipped = events_skipped.load(Ordering::Relaxed);
+        let final_failed = events_failed.load(Ordering::Relaxed);
 
         // Final state save (skip in dry run mode)
         if !self.options.dry_run {
@@ -246,13 +281,13 @@ impl SyncEngine {
 
         info!(
             "Sync complete: synced={}, skipped={}, failed={}",
-            events_synced, events_skipped, events_failed
+            final_synced, final_skipped, final_failed
         );
 
         Ok(SyncResult {
-            events_synced,
-            events_skipped,
-            events_failed,
+            events_synced: final_synced,
+            events_skipped: final_skipped,
+            events_failed: final_failed,
             mode,
         })
     }
