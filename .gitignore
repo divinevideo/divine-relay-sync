@@ -16,3 +16,4 @@ Thumbs.db
 *.lock
 *.state
 *.failures.log
+.relay-sync-state/
