@@ -1,0 +1,8 @@
+{
+  "source": "wss://relay.divine.video",
+  "dest": "wss://relay.poc.dvines.org",
+  "events_synced": 100,
+  "cursor_created_at": 1766363558,
+  "cursor_id": "e579bf03668e26c52e7ffb9aaa9bcebb5171cb188eb609678655c986dce30eba",
+  "last_updated": 1766363628
+}
