@@ -44,6 +44,10 @@ RELAY_SYNC_NSEC=nsec1... relay-sync source.relay.com dest.relay.com
 | `-a, --authors <PUBKEY>` | Filter by author pubkey (repeatable) |
 | `--since <DATE>` | Sync events after date (YYYY-MM-DD) |
 | `--until <DATE>` | Sync events before date (YYYY-MM-DD) |
+| `--include-notes` | Include kind 1 events (excluded by default) |
+| `--include-deletions` | Include kind 5 events (excluded by default) |
+| `--exclude-tag <TAG:VALUE>` | Exclude events with tag (e.g., `L:pink.momostr`) |
+| `--tag <TAG:VALUE>` | Require events have tag (e.g., `t:nostr`) |
 | `--fresh` | Ignore saved state, start fresh |
 | `--dry-run` | Show what would sync without publishing |
 | `-q, --quiet` | Minimal output |
@@ -51,6 +55,8 @@ RELAY_SYNC_NSEC=nsec1... relay-sync source.relay.com dest.relay.com
 | `--json` | Output results as JSON |
 | `-c, --config <FILE>` | Use config file |
 | `--name <NAME>` | Select sync config by name |
+
+**Note:** By default, kind 1 (notes), kind 5 (deletions), and events tagged with `L:pink.momostr` are excluded to focus on long-form content and metadata.
 
 ## Config File
 
@@ -66,6 +72,10 @@ source = "source.relay.com"
 dest = "dest.relay.com"
 kinds = [1, 30023]
 authors = ["pubkey1", "pubkey2"]
+include_notes = true        # include kind 1 (default: false)
+include_deletions = false   # include kind 5 (default: false)
+exclude_tags = ["L:pink.momostr"]
+tags = ["t:nostr"]          # require events have this tag
 ```
 
 Then run:

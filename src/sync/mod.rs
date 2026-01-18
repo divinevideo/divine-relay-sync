@@ -7,5 +7,5 @@ pub mod publisher;
 pub mod rate_limiter;
 pub mod reconciler;
 
-pub use engine::{SyncEngine, SyncOptions, SyncResult};
+pub use engine::{SyncEngine, SyncOptions, SyncResult, DEFAULT_EXCLUDE_KINDS, DEFAULT_EXCLUDE_TAGS};
 pub use rate_limiter::RateLimiter;

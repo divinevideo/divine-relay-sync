@@ -27,6 +27,18 @@ pub struct SyncConfig {
     pub authors: Option<Vec<String>>,
     pub since: Option<String>,
     pub until: Option<String>,
+    /// Include kind 1 (notes) - excluded by default
+    #[serde(default)]
+    pub include_notes: bool,
+    /// Include kind 5 (deletions) - excluded by default
+    #[serde(default)]
+    pub include_deletions: bool,
+    /// Additional tags to exclude (format: ["L:pink.momostr"])
+    #[serde(default)]
+    pub exclude_tags: Vec<String>,
+    /// Tags to require (format: ["t:nostr"])
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl AuthConfig {

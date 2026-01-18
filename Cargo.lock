@@ -1677,6 +1677,7 @@ dependencies = [
  "hex",
  "hostname",
  "indicatif",
+ "libc",
  "nonzero_ext",
  "nostr-sdk",
  "reqwest",

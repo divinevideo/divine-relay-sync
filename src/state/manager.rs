@@ -1,6 +1,9 @@
 // ABOUTME: State manager for persistence and locking
 // ABOUTME: Manages sync state, lock files, and failure logs
 
+#[cfg(unix)]
+use libc;
+
 use crate::error::{Error, ErrorKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -174,6 +177,54 @@ impl StateManager {
         Ok(Some(state))
     }
 
+    /// Check if a process is still running
+    fn is_process_running(pid: u32) -> bool {
+        #[cfg(unix)]
+        {
+            // On Unix, signal 0 checks if process exists without actually sending a signal
+            unsafe { libc::kill(pid as i32, 0) == 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, assume process is running (safer default)
+            true
+        }
+    }
+
+    /// Check if lock is stale (process dead or too old)
+    fn is_lock_stale(lock_path: &Path) -> bool {
+        if let Ok(content) = fs::read_to_string(lock_path) {
+            // Format: hostname:pid:timestamp
+            let parts: Vec<&str> = content.split(':').collect();
+            if parts.len() >= 3 {
+                // Check if PID is still running (only if same host)
+                let lock_hostname = parts[0];
+                let current_hostname = hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
+
+                if lock_hostname == current_hostname {
+                    if let Ok(pid) = parts[1].parse::<u32>() {
+                        if !Self::is_process_running(pid) {
+                            tracing::info!("Removing stale lock (PID {} no longer running)", pid);
+                            return true;
+                        }
+                    }
+                }
+
+                // Also consider lock stale if older than 1 hour
+                if let Ok(timestamp) = parts[2].parse::<i64>() {
+                    let age = now() - timestamp;
+                    if age > 3600 {
+                        tracing::info!("Removing stale lock (older than 1 hour)");
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Acquire lock (blocking)
     pub fn acquire_lock(
         &self,
@@ -184,6 +235,11 @@ impl StateManager {
     ) -> Result<Option<LockGuard>, Error> {
         let key = Self::compute_key(source, dest, kinds, authors);
         let lock_path = self.lock_path(&key);
+
+        // Check for and remove stale locks
+        if lock_path.exists() && Self::is_lock_stale(&lock_path) {
+            let _ = fs::remove_file(&lock_path);
+        }
 
         // Try to create lock file exclusively
         match OpenOptions::new()

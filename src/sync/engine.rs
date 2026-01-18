@@ -15,6 +15,12 @@ use tracing::{debug, info, warn};
 /// Maximum concurrent publish operations
 const MAX_CONCURRENT_PUBLISHES: usize = 200;
 
+/// Default kinds to exclude (notes and deletions)
+pub const DEFAULT_EXCLUDE_KINDS: &[u16] = &[1, 5];
+
+/// Default tags to exclude
+pub const DEFAULT_EXCLUDE_TAGS: &[(&str, &str)] = &[("L", "pink.momostr")];
+
 /// Configuration options for sync operation
 #[derive(Debug, Clone)]
 pub struct SyncOptions {
@@ -27,6 +33,12 @@ pub struct SyncOptions {
     pub fresh: bool,
     pub dry_run: bool,
     pub nsec: Option<String>,
+    /// Kinds to exclude from sync
+    pub exclude_kinds: Vec<u16>,
+    /// Tags to exclude (tag_name, tag_value)
+    pub exclude_tags: Vec<(String, String)>,
+    /// Tags to require (tag_name, tag_value)
+    pub include_tags: Vec<(String, String)>,
 }
 
 /// Result of sync operation
@@ -35,6 +47,7 @@ pub struct SyncResult {
     pub events_synced: u64,
     pub events_skipped: u64,
     pub events_failed: u64,
+    pub events_filtered: u64,
     pub mode: SyncMode,
 }
 
@@ -64,6 +77,47 @@ impl SyncEngine {
             state_manager,
             shutdown,
         }
+    }
+
+    /// Check if an event should be filtered out (excluded from sync)
+    fn should_filter_event(event: &Event, options: &SyncOptions) -> bool {
+        // Check excluded kinds
+        let kind_num = event.kind.as_u16();
+        if options.exclude_kinds.contains(&kind_num) {
+            debug!("Filtering event {} - excluded kind {}", event.id, kind_num);
+            return true;
+        }
+
+        // Check excluded tags
+        for (tag_name, tag_value) in &options.exclude_tags {
+            for tag in event.tags.iter() {
+                let tag_vec: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
+                if tag_vec.len() >= 2 && tag_vec[0] == tag_name && tag_vec[1] == tag_value {
+                    debug!(
+                        "Filtering event {} - excluded tag [{}, {}]",
+                        event.id, tag_name, tag_value
+                    );
+                    return true;
+                }
+            }
+        }
+
+        // Check required tags (if any specified, event must have at least one)
+        if !options.include_tags.is_empty() {
+            let has_required_tag = options.include_tags.iter().any(|(tag_name, tag_value)| {
+                event.tags.iter().any(|tag| {
+                    let tag_vec: Vec<&str> = tag.as_slice().iter().map(|s| s.as_str()).collect();
+                    tag_vec.len() >= 2 && tag_vec[0] == tag_name && tag_vec[1] == tag_value
+                })
+            });
+
+            if !has_required_tag {
+                debug!("Filtering event {} - missing required tag", event.id);
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Run the sync operation
@@ -169,6 +223,7 @@ impl SyncEngine {
         let events_synced = Arc::new(AtomicU64::new(0));
         let events_skipped = Arc::new(AtomicU64::new(0));
         let events_failed = Arc::new(AtomicU64::new(0));
+        let events_filtered = Arc::new(AtomicU64::new(0));
 
         // Semaphore to limit concurrent publishes
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_PUBLISHES));
@@ -178,8 +233,10 @@ impl SyncEngine {
         let synced = events_synced.clone();
         let skipped = events_skipped.clone();
         let failed = events_failed.clone();
+        let filtered = events_filtered.clone();
         let shutdown = self.shutdown.clone();
         let dry_run = self.options.dry_run;
+        let filter_options = self.options.clone();
 
         // Spawn publisher workers that pull from channel
         let publisher_handle = tokio::spawn(async move {
@@ -188,6 +245,12 @@ impl SyncEngine {
             while let Some(event) = rx.recv().await {
                 if shutdown.is_cancelled() {
                     break;
+                }
+
+                // Apply exclusion filters
+                if Self::should_filter_event(&event, &filter_options) {
+                    filtered.fetch_add(1, Ordering::Relaxed);
+                    continue;
                 }
 
                 // Dry run mode - just count
@@ -266,6 +329,7 @@ impl SyncEngine {
         let final_synced = events_synced.load(Ordering::Relaxed);
         let final_skipped = events_skipped.load(Ordering::Relaxed);
         let final_failed = events_failed.load(Ordering::Relaxed);
+        let final_filtered = events_filtered.load(Ordering::Relaxed);
 
         // Final state save (skip in dry run mode)
         if !self.options.dry_run {
@@ -280,14 +344,15 @@ impl SyncEngine {
         dest.disconnect().await;
 
         info!(
-            "Sync complete: synced={}, skipped={}, failed={}",
-            final_synced, final_skipped, final_failed
+            "Sync complete: synced={}, skipped={}, failed={}, filtered={}",
+            final_synced, final_skipped, final_failed, final_filtered
         );
 
         Ok(SyncResult {
             events_synced: final_synced,
             events_skipped: final_skipped,
             events_failed: final_failed,
+            events_filtered: final_filtered,
             mode,
         })
     }

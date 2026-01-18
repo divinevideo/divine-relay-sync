@@ -67,6 +67,11 @@ pub async fn fetch_events(
 
         // Send events to channel
         for event in sorted_events {
+            // Check shutdown between each event
+            if shutdown.is_cancelled() {
+                info!("Fetcher received shutdown signal during batch");
+                return Ok(());
+            }
             if sender.send(event).await.is_err() {
                 warn!("Failed to send event to channel, receiver dropped");
                 return Ok(());

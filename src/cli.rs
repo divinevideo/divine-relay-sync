@@ -70,6 +70,22 @@ pub struct Cli {
     /// Run all sync configs (when using --config)
     #[arg(long)]
     pub all: bool,
+
+    /// Include kind 1 (notes) - excluded by default
+    #[arg(long)]
+    pub include_notes: bool,
+
+    /// Include kind 5 (deletions) - excluded by default
+    #[arg(long)]
+    pub include_deletions: bool,
+
+    /// Exclude events with tag (format: tagname:value, e.g. L:pink.momostr)
+    #[arg(long = "exclude-tag", value_name = "TAG:VALUE")]
+    pub exclude_tags: Vec<String>,
+
+    /// Include events with tag (format: tagname:value, e.g. t:nostr)
+    #[arg(long = "tag", value_name = "TAG:VALUE")]
+    pub tags: Vec<String>,
 }
 
 /// Normalize relay URL by adding wss:// if missing
@@ -103,6 +119,16 @@ pub fn parse_date(s: &str) -> Result<i64, String> {
     Err(format!("invalid date format: {}", s))
 }
 
+/// Parse a tag filter string (format: "tagname:value")
+pub fn parse_tag_filter(s: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = s.splitn(2, ':').collect();
+    if parts.len() == 2 {
+        Some((parts[0].to_string(), parts[1].to_string()))
+    } else {
+        None
+    }
+}
+
 impl Cli {
     /// Get normalized source URL
     pub fn source_url(&self) -> Option<String> {
@@ -112,5 +138,21 @@ impl Cli {
     /// Get normalized destination URL
     pub fn dest_url(&self) -> Option<String> {
         self.dest.as_ref().map(|s| normalize_relay_url(s))
+    }
+
+    /// Get parsed exclude tags
+    pub fn parsed_exclude_tags(&self) -> Vec<(String, String)> {
+        self.exclude_tags
+            .iter()
+            .filter_map(|s| parse_tag_filter(s))
+            .collect()
+    }
+
+    /// Get parsed include tags
+    pub fn parsed_tags(&self) -> Vec<(String, String)> {
+        self.tags
+            .iter()
+            .filter_map(|s| parse_tag_filter(s))
+            .collect()
     }
 }
