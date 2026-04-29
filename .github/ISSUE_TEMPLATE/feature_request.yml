@@ -1,0 +1,36 @@
+name: Feature Request
+description: Propose an enhancement or new capability
+title: "feat: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use generic descriptors instead of partner, customer, or brand names in public issue titles, bodies, and screenshots unless a maintainer explicitly approves naming them.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the requested capability.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Explain the user or operational gap this addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Approach
+      description: Describe the preferred solution or constraints.
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional Context
+      description: Include examples or references with sensitive names redacted.
