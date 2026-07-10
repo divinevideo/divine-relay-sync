@@ -97,3 +97,7 @@ State is saved in `.relay-sync-state/` for resuming interrupted syncs.
 ## License
 
 MIT
+
+---
+
+Part of [Divine](https://divine.video) — your playground for human creativity · [Brand guidelines](https://github.com/divinevideo/brand-guidelines)
