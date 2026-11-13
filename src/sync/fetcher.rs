@@ -27,6 +27,7 @@ struct Source {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     auth: Authenticator,
     url: String,
+    challenge: Option<String>,
 }
 
 impl Source {
@@ -57,39 +58,40 @@ impl Source {
     }
 
     async fn response(&mut self, request: &Value) -> Result<Value> {
-        let mut authenticated = false;
+        let mut retried_auth = false;
         loop {
             let message = self.receive().await?;
             if message[0] == "AUTH" {
-                if authenticated {
-                    return Err(incomplete("repeated authentication challenge"));
-                }
-                let challenge = message[1]
-                    .as_str()
-                    .ok_or_else(|| incomplete("invalid auth challenge"))?;
-                let event = self.auth.create_auth_event(&self.url, challenge)?;
-                self.send(&json!(["AUTH", event])).await?;
-                loop {
-                    let reply = self.receive().await?;
-                    if reply[0] == "OK" && reply[1] == event.id.to_hex() {
-                        if reply[2] != true {
-                            return Err(incomplete("source rejected authentication"));
-                        }
-                        break;
-                    }
-                    // A request sent before authentication can be rejected;
-                    // it is reissued after the AUTH acknowledgement.
-                    if reply[0] == "CLOSED" && reply[1] == request[1] {
-                        continue;
-                    }
-                    return Err(incomplete("unexpected response during authentication"));
-                }
-                authenticated = true;
-                self.send(request).await?;
+                // A challenge is an offer, not evidence that a public read
+                // requires authentication. Keep it for an explicit rejection.
+                self.challenge = Some(
+                    message[1]
+                        .as_str()
+                        .ok_or_else(|| incomplete("invalid auth challenge"))?
+                        .to_owned(),
+                );
                 continue;
             }
             if message[1] == request[1] {
                 if message[0] == "CLOSED" {
+                    if !retried_auth
+                        && message[2]
+                            .as_str()
+                            .is_some_and(|reason| reason.starts_with("auth-required:"))
+                    {
+                        let challenge = self.challenge.as_deref().ok_or_else(|| {
+                            incomplete("source requires authentication without a challenge")
+                        })?;
+                        let event = self.auth.create_auth_event(&self.url, challenge)?;
+                        self.send(&json!(["AUTH", event])).await?;
+                        let reply = self.receive().await?;
+                        if reply[0] != "OK" || reply[1] != event.id.to_hex() || reply[2] != true {
+                            return Err(incomplete("source rejected authentication"));
+                        }
+                        retried_auth = true;
+                        self.send(request).await?;
+                        continue;
+                    }
                     return Err(incomplete("source closed request"));
                 }
                 return Ok(message);
@@ -177,7 +179,7 @@ pub async fn fetch_events(
             let (socket, _) = tokio::time::timeout(REQUEST_TIMEOUT, connect_async(url)).await
                 .map_err(|_| incomplete("connection timed out"))?
                 .map_err(|e| incomplete(format!("connection failed: {e}")))?;
-            let mut source = Source { socket, auth: Authenticator::new(nsec)?, url: url.to_owned() };
+            let mut source = Source { socket, auth: Authenticator::new(nsec)?, url: url.to_owned(), challenge: None };
             let since = filter.since.unwrap_or(Timestamp::from(0)).as_u64();
             let until = filter.until.unwrap_or_else(Timestamp::now).as_u64();
             let mut windows = vec![(since, until)];

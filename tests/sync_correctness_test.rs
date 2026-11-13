@@ -24,6 +24,7 @@ struct Behavior {
     drop_eose: bool,
     hang_count: bool,
     require_auth: bool,
+    offer_auth: bool,
     negentropy: bool,
     reject_negentropy: bool,
     drift_after_page: bool,
@@ -93,7 +94,7 @@ impl Relay {
                     let mut ws = WebSocketStream::from_raw_socket(socket, Role::Server, None).await;
                     let require_auth = options.lock().unwrap().require_auth;
                     let mut authenticated = !require_auth;
-                    if require_auth {
+                    if require_auth || options.lock().unwrap().offer_auth {
                         ws.send(Message::Text(
                             json!(["AUTH", "generated-test-challenge"]).to_string(),
                         ))
@@ -702,4 +703,24 @@ async fn missing_count_response_times_out_without_checkpoint() {
     .unwrap();
     assert!(result.unwrap_err().message.contains("COUNT timed out"));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn optional_auth_challenges_do_not_block_public_reads_with_or_without_keys() {
+    for use_keys in [false, true] {
+        let source = Relay::start(Behavior {
+            offer_auth: true,
+            ..Default::default()
+        })
+        .await;
+        let dest = Relay::start(Behavior::default()).await;
+        source.seed(50);
+        let dir = TempDir::new().unwrap();
+        let mut opts = options(&source, &dest);
+        if use_keys {
+            opts.nsec = Some(Keys::generate().secret_key().to_secret_hex());
+        }
+        run(opts, &dir).await.unwrap();
+        assert_eq!(dest.events.lock().unwrap().len(), 1);
+    }
 }
