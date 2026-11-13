@@ -1,17 +1,17 @@
 # Divine Relay Sync
 
-A command-line tool for copying Nostr events from one relay to another. It uses [NIP-77 negentropy](https://github.com/nostr-protocol/nips/blob/master/77.md) to figure out which events the destination is missing without transferring the full set, then fetches and republishes only what's needed. Divine runs its own relay infrastructure, and `relay-sync` is the utility that keeps events consistent across those relays, seeds a new relay from an existing one, or mirrors specific content between relays.
+A command-line tool for copying Nostr events from one relay to another. It uses [NIP-77 negentropy](https://github.com/nostr-protocol/nips/blob/master/77.md) to reconcile the source event set, then fetches and republishes events to the destination. Divine runs its own relay infrastructure, and `relay-sync` is the utility that keeps events consistent across those relays, seeds a new relay from an existing one, or mirrors specific content between relays.
 
 ## Features
 
-- **Efficient reconciliation** via NIP-77 negentropy when both relays support it, so only missing events cross the wire.
-- **Automatic fallback** to timestamp-based pagination when either relay lacks NIP-77 support.
+- **Source-set reconciliation** via NIP-77 negentropy when both relays support it, with explicit duplicate handling at the destination.
+- **Strict timestamp fallback** when either relay lacks NIP-77 support. Exact NIP-45 counts are required to verify each fetched window; unsupported, approximate or missing counts fail the run.
 - **Relay capability discovery** through NIP-11, used to detect negentropy support and authentication requirements.
 - **NIP-42 authentication** for reading from or writing to protected relays, with the signing key supplied via environment variable.
 - **Connection fallback** that tries `ws://` when `wss://` fails (and vice versa).
 - **Flexible filtering** by event kind, author, date range, and tags. By default, kind 1 (notes), kind 5 (deletions), and `L:pink.momostr` tagged events are excluded to focus on long-form content and metadata.
-- **Resumable syncs** with on-disk state, so an interrupted run picks up where it left off.
-- **Concurrent publishing** with adaptive rate limiting to move events quickly without overwhelming the destination.
+- **Successful-run checkpoints** with on-disk state. Interrupted or partial runs replay their uncommitted interval rather than skipping uncertain events.
+- **Bounded concurrent publishing** with retries for retryable destination errors.
 - **Config file support** for defining and re-running named syncs.
 
 ## Architecture
@@ -20,11 +20,22 @@ A command-line tool for copying Nostr events from one relay to another. It uses 
 
 **Capability discovery.** On connect, the tool fetches each relay's NIP-11 document to learn whether it supports NIP-77 negentropy (NIP 77 in `supported_nips`) and whether it requires authentication.
 
-**Sync mode selection.** If both relays advertise NIP-77 support, the tool uses negentropy reconciliation. It exchanges compact fingerprints with the source to determine exactly which event IDs the destination is missing, then loads those events and streams them into the publish pipeline. If either relay lacks NIP-77 support, it falls back to timestamp-based pagination, walking the source's events forward from the sync cursor.
+**Sync mode selection.** If both relays advertise NIP-77 support, the tool uses negentropy reconciliation. It exchanges compact fingerprints with the source to identify event IDs absent from this run's local receive database, then streams the received events into the publish pipeline. The destination set is not preloaded; explicit duplicate acknowledgements handle events already present there. If either relay lacks NIP-77 support, it uses exact NIP-45 counts before and after each timestamp-window read. Capped windows split into disjoint time ranges. If a single second still cannot be fully retrieved, or the source cannot provide an exact count, the run fails without advancing its checkpoint. Counts describe the selected source relay, not global Nostr coverage. Matching counts do not provide an atomic snapshot of a changing relay.
 
-**Pipeline.** Fetched events flow through an in-memory channel to a pool of publisher workers that send events to the destination concurrently (bounded by a semaphore), applying kind and tag exclusion filters along the way. Duplicates reported by the destination are counted as skipped rather than failures.
+**Pipeline.** Fetched events flow through an in-memory channel to a pool of publisher workers that send events to the destination concurrently (at most 200 active publisher tasks), applying kind and tag exclusion filters along the way. Duplicates reported by the destination are counted as skipped rather than failures.
 
-**State and resumption.** Progress is persisted under `.relay-sync-state/`, keyed by the source, destination, and filter set, so a subsequent run resumes from the last cursor. A lock file prevents two syncs with the same parameters from running at once; stale locks (from a dead process, or older than an hour) are cleared automatically.
+**State and resumption.** State is atomically replaced under `.relay-sync-state/` only after the entire requested interval has been fetched and all selected events have been acknowledged by the destination (including explicit duplicates). The key includes source, destination, kinds, authors, time bounds, tag/exclusion policy and authentication public key. Credentials are not stored in the selection key. Failures, cancellation and dry runs leave the prior checkpoint unchanged; already accepted events may be replayed on retry. A process lock prevents concurrent runs with the same selection, and only a demonstrably dead local process has its stale lock removed.
+
+Each successful run records its fixed upper time bound and acknowledged-event progress. The next run re-reads that boundary second inclusively, then scans newer timestamps. `--fresh` ignores that checkpoint and scans the whole configured range. Legacy checkpoints use a different namespace and are deliberately not reused, resulting in one safe full rescan.
+
+Timestamp checkpoints cannot discover a newly arriving, backdated event older than their lower bound. For recurring contact-list reconciliation, refresh discovered authors over the full configured range with `--fresh`; a forward timestamp scan alone is not a freshness guarantee. Required `--tag p:<target>` filtering is suitable for discovering candidates, but it discards a newer contact list that removes that target. Refresh authors without that required tag to propagate unfollows.
+
+```bash
+# Refresh previously discovered authors, including newer unfollows
+relay-sync source.relay.com dest.relay.com -k 3 -a <hex-pubkey> --fresh
+```
+
+The CLI exits nonzero for incomplete source reads, unsupported/approximate counts, timeouts, cancellation or rejected destination publishes. No success checkpoint is written in those cases. NIP-77 failures and missing received events also fail rather than silently reporting a successful transfer. The SDK retains at most 100,000 events in memory for NIP-77; a run exceeding that retention may fail closed and must be narrowed with kinds, authors or time bounds. Timestamp windows retain at most 500 events each and split when a source serves fewer than its exact count.
 
 Within Divine's relay infrastructure, this makes `relay-sync` the building block for keeping relays in sync, backfilling a new relay, and mirroring targeted subsets of content between relays.
 
@@ -70,7 +81,7 @@ relay-sync source.relay.com dest.relay.com --dry-run
 RELAY_SYNC_NSEC=nsec1... relay-sync source.relay.com dest.relay.com
 ```
 
-Relay arguments accept a bare host, a `wss://` URL, or a `ws://` URL. Dates accept `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM:SS`, or a raw Unix timestamp. The process exits non-zero if any events failed to publish.
+Relay arguments accept a bare host, a `wss://` URL, or a `ws://` URL. Dates accept `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM:SS`, or a raw Unix timestamp. The process exits nonzero if source coverage is incomplete or any selected event fails to publish.
 
 ## Configuration
 
@@ -130,7 +141,7 @@ A config with a single `[[sync]]` block runs without `--name`; if it defines mor
 
 ## Deployment
 
-`relay-sync` is a standalone binary with no server component. For a one-off migration or backfill, run it directly. For ongoing consistency between relays, schedule it (for example with cron or a systemd timer) using a config file; the persisted state under `.relay-sync-state/` lets each scheduled run resume from the previous cursor, and the lock file keeps overlapping runs from colliding. Provide `RELAY_SYNC_NSEC` in the scheduled environment when the destination relay requires authentication.
+`relay-sync` is a standalone binary with no server component. For a one-off migration or backfill, run it directly. For ongoing consistency between relays, schedule it (for example with cron or a systemd timer) using a config file; successful-run checkpoints under `.relay-sync-state/` let each scheduled run replay the last boundary second and fetch newer events, while the selection lock prevents overlapping runs. Interrupted intervals are retried from the last successful checkpoint. Source quotas, scheduling, durable author inventory and a production reconciliation service are outside this CLI. Provide `RELAY_SYNC_NSEC` in the scheduled environment when the destination relay requires authentication.
 
 ## Development
 

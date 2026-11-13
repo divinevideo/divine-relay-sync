@@ -5,7 +5,7 @@ use crate::error::{Error, ErrorKind, Result};
 use nostr_sdk::prelude::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Reconcile using Client directly
 /// Returns number of events found that need syncing
@@ -18,26 +18,40 @@ pub async fn reconcile_with_client(
 ) -> Result<u64> {
     info!("Starting negentropy reconciliation with {}", source_url);
 
-    let opts = SyncOptions::default()
-        .direction(SyncDirection::Down);
+    let opts = SyncOptions::default().direction(SyncDirection::Down);
 
-    let source_relay = RelayUrl::parse(source_url).map_err(|e| {
-        Error::with_source(ErrorKind::ConfigError, "invalid source URL", e)
-    })?;
+    let source_relay = RelayUrl::parse(source_url)
+        .map_err(|e| Error::with_source(ErrorKind::ConfigError, "invalid source URL", e))?;
 
     // Perform reconciliation
-    let reconciliation = client
-        .sync_with([source_relay.clone()], filter, &opts)
-        .await
-        .map_err(|e| {
-            Error::with_source(ErrorKind::NegentropyError, "negentropy sync failed", e)
-        })?;
+    let reconciliation = tokio::select! {
+        _ = shutdown.cancelled() => return Err(Error::new(ErrorKind::NegentropyError, "reconciliation cancelled")),
+        result = tokio::time::timeout(std::time::Duration::from_secs(60), client.sync_with([source_relay.clone()], filter, &opts)) => {
+            result.map_err(|_| Error::new(ErrorKind::NegentropyError, "reconciliation timed out"))?
+                .map_err(|e| Error::with_source(ErrorKind::NegentropyError, "negentropy sync failed", e))?
+        }
+    };
+
+    if !reconciliation
+        .val
+        .remote
+        .is_subset(&reconciliation.val.received)
+    {
+        return Err(Error::new(
+            ErrorKind::NegentropyError,
+            "source did not deliver every reconciled missing id",
+        ));
+    }
 
     let mut events_found = 0u64;
 
     // Check for successful reconciliation
     if reconciliation.success.contains(&source_relay) {
-        info!("Negentropy with {}: {} events received", source_relay, reconciliation.val.received.len());
+        info!(
+            "Negentropy with {}: {} events received",
+            source_relay,
+            reconciliation.val.received.len()
+        );
 
         // Get database reference
         let db = client.database();
@@ -45,38 +59,60 @@ pub async fn reconcile_with_client(
         // Fetch each received event from the database
         for event_id in &reconciliation.val.received {
             if shutdown.is_cancelled() {
-                info!("Shutdown during negentropy reconciliation");
-                break;
+                return Err(Error::new(
+                    ErrorKind::NegentropyError,
+                    "reconciliation cancelled",
+                ));
             }
 
             // Query event from database
             match db.event_by_id(event_id).await {
                 Ok(Some(event)) => {
                     if tx.send(event).await.is_err() {
-                        warn!("Publisher channel closed during reconciliation");
-                        break;
+                        return Err(Error::new(ErrorKind::NegentropyError, "publisher stopped"));
                     }
                     events_found += 1;
                 }
                 Ok(None) => {
-                    warn!("Event {} was received but not found in database", event_id);
+                    return Err(Error::new(
+                        ErrorKind::NegentropyError,
+                        format!("received event {event_id} missing from database"),
+                    ));
                 }
                 Err(e) => {
-                    warn!("Failed to query event {} from database: {}", event_id, e);
+                    return Err(Error::with_source(
+                        ErrorKind::NegentropyError,
+                        "read reconciled event",
+                        e,
+                    ));
                 }
             }
         }
     } else {
-        warn!("Negentropy with {} was not successful", source_relay);
+        return Err(Error::new(
+            ErrorKind::NegentropyError,
+            "source reconciliation did not succeed",
+        ));
     }
 
-    // Log failures
-    for (url, err) in reconciliation.failed.iter() {
-        warn!("Negentropy failed with {}: {:?}", url, err);
+    if !reconciliation.failed.is_empty() {
+        return Err(Error::new(
+            ErrorKind::NegentropyError,
+            "source reconciliation was partial",
+        ));
+    }
+    if shutdown.is_cancelled() {
+        return Err(Error::new(
+            ErrorKind::NegentropyError,
+            "reconciliation cancelled",
+        ));
     }
 
     drop(tx); // Signal completion
-    info!("Negentropy reconciliation complete: {} events to sync", events_found);
+    info!(
+        "Negentropy reconciliation complete: {} events to sync",
+        events_found
+    );
     Ok(events_found)
 }
 

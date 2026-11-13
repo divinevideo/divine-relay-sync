@@ -17,3 +17,6 @@ Thumbs.db
 *.state
 *.failures.log
 .relay-sync-state/
+
+# Isolated agent task worktrees
+/.claude/worktrees/

@@ -19,4 +19,8 @@
 - Better connection status verification before proceeding with sync
 
 ### Fixed
+- Refuse incomplete timestamp scans: verify exact NIP-45 counts, split capped time windows, and fail instead of skipping unseen events in a saturated second.
+- Save atomic checkpoints under the full selection policy only after successful fetching and publishing; replay failed intervals and the last completed second safely.
+- Preserve explicit duplicate acknowledgements and propagate source, NIP-77, cancellation and destination errors without advancing progress.
+- Retain received events for NIP-77 transfers, and keep active process locks even during long-running syncs.
 - Connection failures now properly detected instead of silently proceeding
