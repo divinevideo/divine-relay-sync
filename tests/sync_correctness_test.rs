@@ -651,6 +651,28 @@ async fn future_upper_bound_checkpoints_only_elapsed_time() {
     assert_eq!(dest.events.lock().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn expired_source_events_count_toward_coverage_but_are_not_republished() {
+    let source = Relay::start(Behavior::default()).await;
+    let dest = Relay::start(Behavior::default()).await;
+    source.seed(40);
+    let expired = EventBuilder::new(Kind::ContactList, "")
+        .tag(Tag::expiration(Timestamp::from(60)))
+        .custom_created_at(Timestamp::from(50))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    source
+        .events
+        .lock()
+        .unwrap()
+        .insert(expired.id, expired.clone());
+    let dir = TempDir::new().unwrap();
+    run(options(&source, &dest), &dir).await.unwrap();
+    let delivered = dest.events.lock().unwrap();
+    assert_eq!(delivered.len(), 1);
+    assert!(!delivered.contains_key(&expired.id));
+}
+
 #[test]
 fn active_process_lock_does_not_expire_during_a_long_sync() {
     let dir = TempDir::new().unwrap();

@@ -271,6 +271,13 @@ impl SyncEngine {
                 }
                 event = receiver.recv(), if workers.len() < MAX_CONCURRENT_PUBLISHES => {
                     let Some(event) = event else { break; };
+                    // NIP-40: never republish an expired event. In timestamp mode it
+                    // already counted toward the source coverage check; the NIP-77
+                    // path never delivers one, because the SDK drops it on receipt.
+                    if event.is_expired() {
+                        tracing::warn!("Skipping source event {}: event expired", event.id);
+                        continue;
+                    }
                     if Self::should_filter_event(&event, &self.options) { stats.events_filtered += 1; continue; }
                     if self.options.dry_run { stats.events_synced += 1; continue; }
                     let client = client.clone();
