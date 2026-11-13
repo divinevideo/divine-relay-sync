@@ -23,4 +23,5 @@
 - Save atomic checkpoints under the full selection policy only after successful fetching and publishing; replay failed intervals and the last completed second safely.
 - Preserve explicit duplicate acknowledgements and propagate source, NIP-77, cancellation and destination errors without advancing progress.
 - Retain received events for NIP-77 transfers, and keep active process locks even during long-running syncs.
+- Checkpoint the run start time when `--until` lies in the future, so the next run still scans events created after this one.
 - Connection failures now properly detected instead of silently proceeding

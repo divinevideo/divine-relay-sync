@@ -635,6 +635,22 @@ async fn negentropy_transfers_received_events_and_propagates_failure() {
     assert_eq!(std::fs::read(checkpoint).unwrap(), before);
 }
 
+#[tokio::test]
+async fn future_upper_bound_checkpoints_only_elapsed_time() {
+    let source = Relay::start(Behavior::default()).await;
+    let dest = Relay::start(Behavior::default()).await;
+    let now = Timestamp::now().as_u64();
+    source.seed(now - 10);
+    let dir = TempDir::new().unwrap();
+    let mut opts = options(&source, &dest);
+    opts.until = Some((now + 86_400) as i64);
+    run(opts.clone(), &dir).await.unwrap();
+    // Created after the first run, but still inside the configured bound.
+    source.seed(now + 60);
+    run(opts, &dir).await.unwrap();
+    assert_eq!(dest.events.lock().unwrap().len(), 2);
+}
+
 #[test]
 fn active_process_lock_does_not_expire_during_a_long_sync() {
     let dir = TempDir::new().unwrap();

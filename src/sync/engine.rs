@@ -152,10 +152,8 @@ impl SyncEngine {
             self.state_manager.load_for_scope(&key)?
         }
         .unwrap_or_else(|| SyncState::new(&self.options.source_url, &self.options.dest_url));
-        let end = self
-            .options
-            .until
-            .unwrap_or(Timestamp::now().as_u64() as i64);
+        let started_at = Timestamp::now().as_u64() as i64;
+        let end = self.options.until.unwrap_or(started_at);
         if end < 0 {
             return Err(Error::new(ErrorKind::ConfigError, "negative upper bound"));
         }
@@ -248,7 +246,9 @@ impl SyncEngine {
         }
         if !self.options.dry_run {
             state.increment_events(result.events_synced);
-            state.cursor_created_at = Some(end);
+            // A future upper bound has not elapsed yet: events created between
+            // now and that bound must still be scanned by the next run.
+            state.cursor_created_at = Some(end.min(started_at));
             state.cursor_id = None;
             self.state_manager.save_for_scope(&state, &key)?;
         }
