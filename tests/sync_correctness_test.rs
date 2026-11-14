@@ -29,6 +29,7 @@ struct Behavior {
     reject_negentropy: bool,
     drift_after_page: bool,
     auth_reply_noise: bool,
+    reject_write_auth_required_once: bool,
 }
 
 struct Relay {
@@ -107,6 +108,7 @@ impl Relay {
                         negentropy::Negentropy<negentropy::NegentropyStorageVector>,
                     >::new();
                     let mut page_seen = false;
+                    let mut auth_required_rejected = false;
                     while let Some(Ok(message)) = ws.next().await {
                         if !message.is_text() {
                             continue;
@@ -195,6 +197,16 @@ impl Relay {
                                         event.id,
                                         false,
                                         "blocked: test rejection"
+                                    ]));
+                                } else if behavior.reject_write_auth_required_once
+                                    && !auth_required_rejected
+                                {
+                                    auth_required_rejected = true;
+                                    replies.push(json!([
+                                        "OK",
+                                        event.id,
+                                        false,
+                                        "auth-required: test destination"
                                     ]));
                                 } else if let std::collections::hash_map::Entry::Vacant(entry) =
                                     db.entry(event.id)
@@ -511,6 +523,21 @@ async fn auth_reply_is_matched_after_unrelated_messages() {
     let mut opts = options(&source, &dest);
     opts.nsec = Some(Keys::generate().secret_key().to_secret_hex());
     run(opts, &dir).await.unwrap();
+    assert_eq!(dest.events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn destination_auth_required_rejection_is_retried() {
+    let source = Relay::start(Behavior::default()).await;
+    let dest = Relay::start(Behavior {
+        reject_write_auth_required_once: true,
+        ..Default::default()
+    })
+    .await;
+    source.seed(50);
+    let dir = TempDir::new().unwrap();
+    let result = run(options(&source, &dest), &dir).await.unwrap();
+    assert_eq!(result.events_synced, 1);
     assert_eq!(dest.events.lock().unwrap().len(), 1);
 }
 

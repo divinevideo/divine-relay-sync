@@ -42,7 +42,14 @@ pub async fn publish_event(
         if !error.is_retryable() || attempt == 3 {
             return Err(error);
         }
-        tokio::time::sleep(Duration::from_millis(100 * (1 << attempt))).await;
+        // A rejected publish is retried only after background authentication
+        // had a round trip to finish; other errors keep the short ladder.
+        let backoff_ms = if error.kind == ErrorKind::AuthRequired {
+            1_000
+        } else {
+            100 * (1 << attempt)
+        };
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
     }
     unreachable!("last attempt returns its error")
 }
