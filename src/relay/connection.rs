@@ -25,14 +25,18 @@ impl RelayInfo {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
-            .map_err(|e| Error::with_source(ErrorKind::NetworkError, "failed to build HTTP client", e))?;
+            .map_err(|e| {
+                Error::with_source(ErrorKind::NetworkError, "failed to build HTTP client", e)
+            })?;
 
         let response = client
             .get(&http_url)
             .header("Accept", "application/nostr+json")
             .send()
             .await
-            .map_err(|e| Error::with_source(ErrorKind::NetworkError, "failed to fetch NIP-11 info", e))?;
+            .map_err(|e| {
+                Error::with_source(ErrorKind::NetworkError, "failed to fetch NIP-11 info", e)
+            })?;
 
         if !response.status().is_success() {
             return Ok(Self {
@@ -41,10 +45,9 @@ impl RelayInfo {
             });
         }
 
-        let json: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| Error::with_source(ErrorKind::NetworkError, "failed to parse NIP-11 info", e))?;
+        let json: serde_json::Value = response.json().await.map_err(|e| {
+            Error::with_source(ErrorKind::NetworkError, "failed to parse NIP-11 info", e)
+        })?;
 
         let supported_nips = json["supported_nips"]
             .as_array()
@@ -104,7 +107,10 @@ impl RelayConnection {
         }
 
         Err(last_error.unwrap_or_else(|| {
-            Error::new(ErrorKind::NetworkError, format!("failed to connect to {}", url))
+            Error::new(
+                ErrorKind::NetworkError,
+                format!("failed to connect to {}", url),
+            )
         }))
     }
 
@@ -146,36 +152,53 @@ impl RelayConnection {
             None
         };
 
-        // Create client with or without signer
-        let client = if let Some(ref auth) = authenticator {
-            if let Some(keys) = auth.keys() {
-                Client::new(keys.clone())
-            } else {
-                Client::default()
-            }
-        } else {
-            Client::default()
+        // NIP-77 drains received events from the SDK database. Its default
+        // memory backend retains only ids, which would make a transfer partial.
+        let database = MemoryDatabase::with_opts(MemoryDatabaseOptions {
+            events: true,
+            max_events: Some(100_000),
+        });
+        let builder = Client::builder().database(database);
+        let client = match authenticator.as_ref().and_then(|auth| auth.keys()) {
+            Some(keys) => builder.signer(keys.clone()).build(),
+            None => builder.build(),
         };
 
         // Configure relay options for persistent connections
         let relay_opts = RelayOptions::new()
-            .ping(false)  // Disable ping - some relays don't respond
-            .reconnect(true);  // Auto-reconnect on disconnect
+            .ping(false) // Disable ping - some relays don't respond
+            .reconnect(true); // Auto-reconnect on disconnect
 
         // Use pool directly to set custom options
         let relay_url = RelayUrl::parse(url).map_err(|e| {
-            Error::with_source(ErrorKind::ConfigError, format!("invalid relay URL: {}", url), e)
+            Error::with_source(
+                ErrorKind::ConfigError,
+                format!("invalid relay URL: {}", url),
+                e,
+            )
         })?;
 
-        client.pool().add_relay(relay_url.clone(), relay_opts).await.map_err(|e| {
-            Error::with_source(ErrorKind::NetworkError, format!("failed to add relay {}", url), e)
-        })?;
+        client
+            .pool()
+            .add_relay(relay_url.clone(), relay_opts)
+            .await
+            .map_err(|e| {
+                Error::with_source(
+                    ErrorKind::NetworkError,
+                    format!("failed to add relay {}", url),
+                    e,
+                )
+            })?;
 
         client.connect().await;
 
         // Poll for connection status with timeout
         let relay = client.relay(relay_url).await.map_err(|e| {
-            Error::with_source(ErrorKind::NetworkError, format!("failed to get relay {}", url), e)
+            Error::with_source(
+                ErrorKind::NetworkError,
+                format!("failed to get relay {}", url),
+                e,
+            )
         })?;
 
         // Wait up to 5 seconds for connection, checking every 100ms
@@ -216,7 +239,10 @@ impl RelayConnection {
 
     /// Check if we can authenticate
     pub fn can_authenticate(&self) -> bool {
-        self.authenticator.as_ref().map(|a| a.can_authenticate()).unwrap_or(false)
+        self.authenticator
+            .as_ref()
+            .map(|a| a.can_authenticate())
+            .unwrap_or(false)
     }
 
     /// Get the underlying nostr-sdk client

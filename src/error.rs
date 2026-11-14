@@ -34,11 +34,15 @@ pub enum ErrorKind {
 impl ErrorKind {
     /// Whether this error type should be retried
     pub fn is_retryable(&self) -> bool {
+        // AuthRequired is retryable: the SDK authenticates in the background
+        // once challenged but never re-sends the rejected event, so one more
+        // attempt is what completes the publish.
         matches!(
             self,
             ErrorKind::RateLimited
                 | ErrorKind::NetworkError
                 | ErrorKind::RelayDisconnected
+                | ErrorKind::AuthRequired
         )
     }
 

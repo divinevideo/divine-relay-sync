@@ -8,6 +8,7 @@ fn test_error_kind_is_retryable() {
     assert!(ErrorKind::RateLimited.is_retryable());
     assert!(ErrorKind::NetworkError.is_retryable());
     assert!(ErrorKind::RelayDisconnected.is_retryable());
+    assert!(ErrorKind::AuthRequired.is_retryable());
 
     assert!(!ErrorKind::Duplicate.is_retryable());
     assert!(!ErrorKind::Blocked.is_retryable());

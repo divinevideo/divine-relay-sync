@@ -66,7 +66,10 @@ impl StateManager {
     /// Create a new StateManager
     pub fn new(state_dir: &Path) -> Result<Self, Error> {
         fs::create_dir_all(state_dir).map_err(|e| {
-            Error::new(ErrorKind::StateError, format!("Failed to create state directory: {}", e))
+            Error::new(
+                ErrorKind::StateError,
+                format!("Failed to create state directory: {}", e),
+            )
         })?;
 
         #[cfg(unix)]
@@ -74,7 +77,10 @@ impl StateManager {
             // Set directory permissions to 700 (owner only)
             let perms = fs::Permissions::from_mode(0o700);
             fs::set_permissions(state_dir, perms).map_err(|e| {
-                Error::new(ErrorKind::StateError, format!("Failed to set directory permissions: {}", e))
+                Error::new(
+                    ErrorKind::StateError,
+                    format!("Failed to set directory permissions: {}", e),
+                )
             })?;
         }
 
@@ -84,31 +90,17 @@ impl StateManager {
     }
 
     /// Compute unique state key from sync parameters
-    pub fn compute_key(
-        source: &str,
-        dest: &str,
-        kinds: &[u16],
-        authors: &[String],
-    ) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(source.as_bytes());
-        hasher.update(dest.as_bytes());
-
-        // Sort kinds for consistency
-        let mut sorted_kinds = kinds.to_vec();
-        sorted_kinds.sort_unstable();
-        for kind in sorted_kinds {
-            hasher.update(kind.to_string().as_bytes());
-        }
-
-        // Sort authors for consistency
-        let mut sorted_authors = authors.to_vec();
-        sorted_authors.sort();
-        for author in sorted_authors {
-            hasher.update(author.as_bytes());
-        }
-
-        hex::encode(hasher.finalize())
+    pub fn compute_key(source: &str, dest: &str, kinds: &[u16], authors: &[String]) -> String {
+        let mut kinds = kinds.to_vec();
+        kinds.sort_unstable();
+        kinds.dedup();
+        let mut authors = authors.to_vec();
+        authors.sort();
+        authors.dedup();
+        // Structured encoding prevents concatenation collisions between fields.
+        let encoded = serde_json::to_vec(&(source, dest, kinds, authors))
+            .expect("serializing strings and integers cannot fail");
+        hex::encode(Sha256::digest(encoded))
     }
 
     fn state_path(&self, key: &str) -> PathBuf {
@@ -126,29 +118,30 @@ impl StateManager {
     /// Save state to disk
     pub fn save(&self, state: &SyncState) -> Result<(), Error> {
         let key = Self::compute_key(&state.source, &state.dest, &[], &[]);
-        let path = self.state_path(&key);
+        self.save_for_scope(state, &key)
+    }
 
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to serialize state: {}", e)))?;
+    /// Atomically replace the checkpoint for the exact selection policy.
+    pub fn save_for_scope(&self, state: &SyncState, key: &str) -> Result<(), Error> {
+        let path = self.state_path(key);
+        let json = serde_json::to_string_pretty(state).map_err(|e| {
+            Error::new(
+                ErrorKind::StateError,
+                format!("Failed to serialize state: {}", e),
+            )
+        })?;
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to open state file: {}", e)))?;
-
-        #[cfg(unix)]
-        {
-            // Set file permissions to 600 (owner read/write only)
-            let perms = fs::Permissions::from_mode(0o600);
-            file.set_permissions(perms).map_err(|e| {
-                Error::new(ErrorKind::StateError, format!("Failed to set file permissions: {}", e))
-            })?;
-        }
-
+        let mut file = tempfile::NamedTempFile::new_in(&self.state_dir)
+            .map_err(|e| Error::with_source(ErrorKind::StateError, "create checkpoint", e))?;
+        // NamedTempFile creates owner-only files. Persist only after a complete
+        // write, so an interrupted replacement leaves the previous checkpoint.
         file.write_all(json.as_bytes())
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to write state: {}", e)))?;
+            .map_err(|e| Error::with_source(ErrorKind::StateError, "write checkpoint", e))?;
+        file.as_file()
+            .sync_all()
+            .map_err(|e| Error::with_source(ErrorKind::StateError, "sync checkpoint", e))?;
+        file.persist(path)
+            .map_err(|e| Error::with_source(ErrorKind::StateError, "replace checkpoint", e))?;
 
         Ok(())
     }
@@ -162,17 +155,30 @@ impl StateManager {
         authors: &[String],
     ) -> Result<Option<SyncState>, Error> {
         let key = Self::compute_key(source, dest, kinds, authors);
-        let path = self.state_path(&key);
+        self.load_for_scope(&key)
+    }
+
+    /// Load a checkpoint only from its complete selection-policy namespace.
+    pub fn load_for_scope(&self, key: &str) -> Result<Option<SyncState>, Error> {
+        let path = self.state_path(key);
 
         if !path.exists() {
             return Ok(None);
         }
 
-        let data = fs::read_to_string(&path)
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to read state file: {}", e)))?;
+        let data = fs::read_to_string(&path).map_err(|e| {
+            Error::new(
+                ErrorKind::StateError,
+                format!("Failed to read state file: {}", e),
+            )
+        })?;
 
-        let state: SyncState = serde_json::from_str(&data)
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to parse state: {}", e)))?;
+        let state: SyncState = serde_json::from_str(&data).map_err(|e| {
+            Error::new(
+                ErrorKind::StateError,
+                format!("Failed to parse state: {}", e),
+            )
+        })?;
 
         Ok(Some(state))
     }
@@ -182,7 +188,10 @@ impl StateManager {
         #[cfg(unix)]
         {
             // On Unix, signal 0 checks if process exists without actually sending a signal
-            unsafe { libc::kill(pid as i32, 0) == 0 }
+            unsafe {
+                libc::kill(pid as i32, 0) == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            }
         }
         #[cfg(not(unix))]
         {
@@ -191,7 +200,7 @@ impl StateManager {
         }
     }
 
-    /// Check if lock is stale (process dead or too old)
+    /// A lock is stale only when its local owner is demonstrably dead.
     fn is_lock_stale(lock_path: &Path) -> bool {
         if let Ok(content) = fs::read_to_string(lock_path) {
             // Format: hostname:pid:timestamp
@@ -205,21 +214,10 @@ impl StateManager {
 
                 if lock_hostname == current_hostname {
                     if let Ok(pid) = parts[1].parse::<u32>() {
-                        if !Self::is_process_running(pid) {
-                            tracing::info!("Removing stale lock (PID {} no longer running)", pid);
-                            return true;
-                        }
+                        return !Self::is_process_running(pid);
                     }
                 }
-
-                // Also consider lock stale if older than 1 hour
-                if let Ok(timestamp) = parts[2].parse::<i64>() {
-                    let age = now() - timestamp;
-                    if age > 3600 {
-                        tracing::info!("Removing stale lock (older than 1 hour)");
-                        return true;
-                    }
-                }
+                // A remote or unreadable owner is not proof of a stale lock.
             }
         }
         false
@@ -234,7 +232,12 @@ impl StateManager {
         authors: &[String],
     ) -> Result<Option<LockGuard>, Error> {
         let key = Self::compute_key(source, dest, kinds, authors);
-        let lock_path = self.lock_path(&key);
+        self.acquire_scope_lock(&key)
+    }
+
+    /// Hold the same selection-policy lock for the whole transfer.
+    pub fn acquire_scope_lock(&self, key: &str) -> Result<Option<LockGuard>, Error> {
+        let lock_path = self.lock_path(key);
 
         // Check for and remove stale locks
         if lock_path.exists() && Self::is_lock_stale(&lock_path) {
@@ -256,7 +259,10 @@ impl StateManager {
 
                 let lock_info = format!("{}:{}:{}", hostname, pid, timestamp);
                 file.write_all(lock_info.as_bytes()).map_err(|e| {
-                    Error::new(ErrorKind::StateError, format!("Failed to write lock file: {}", e))
+                    Error::new(
+                        ErrorKind::StateError,
+                        format!("Failed to write lock file: {}", e),
+                    )
                 })?;
 
                 #[cfg(unix)]
@@ -264,7 +270,10 @@ impl StateManager {
                     // Set lock file permissions to 600
                     let perms = fs::Permissions::from_mode(0o600);
                     file.set_permissions(perms).map_err(|e| {
-                        Error::new(ErrorKind::StateError, format!("Failed to set lock permissions: {}", e))
+                        Error::new(
+                            ErrorKind::StateError,
+                            format!("Failed to set lock permissions: {}", e),
+                        )
                     })?;
                 }
 
@@ -274,10 +283,10 @@ impl StateManager {
                 // Lock already held
                 Ok(None)
             }
-            Err(e) => Err(Error::new(ErrorKind::StateError, format!(
-                "Failed to create lock file: {}",
-                e
-            ))),
+            Err(e) => Err(Error::new(
+                ErrorKind::StateError,
+                format!("Failed to create lock file: {}", e),
+            )),
         }
     }
 
@@ -309,21 +318,33 @@ impl StateManager {
             .create(true)
             .append(true)
             .open(&path)
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to open failure log: {}", e)))?;
+            .map_err(|e| {
+                Error::new(
+                    ErrorKind::StateError,
+                    format!("Failed to open failure log: {}", e),
+                )
+            })?;
 
         #[cfg(unix)]
         {
             // Set file permissions to 600
             let perms = fs::Permissions::from_mode(0o600);
             file.set_permissions(perms).map_err(|e| {
-                Error::new(ErrorKind::StateError, format!("Failed to set failure log permissions: {}", e))
+                Error::new(
+                    ErrorKind::StateError,
+                    format!("Failed to set failure log permissions: {}", e),
+                )
             })?;
         }
 
         let timestamp = now();
         let line = format!("{}:{}:{}\n", timestamp, event_id, reason);
-        file.write_all(line.as_bytes())
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to write failure log: {}", e)))?;
+        file.write_all(line.as_bytes()).map_err(|e| {
+            Error::new(
+                ErrorKind::StateError,
+                format!("Failed to write failure log: {}", e),
+            )
+        })?;
 
         Ok(())
     }
@@ -343,15 +364,22 @@ impl StateManager {
             return Ok(Vec::new());
         }
 
-        let file = File::open(&path)
-            .map_err(|e| Error::new(ErrorKind::StateError, format!("Failed to open failure log: {}", e)))?;
+        let file = File::open(&path).map_err(|e| {
+            Error::new(
+                ErrorKind::StateError,
+                format!("Failed to open failure log: {}", e),
+            )
+        })?;
 
         let reader = BufReader::new(file);
         let mut failures = Vec::new();
 
         for line in reader.lines() {
             let line = line.map_err(|e| {
-                Error::new(ErrorKind::StateError, format!("Failed to read failure log: {}", e))
+                Error::new(
+                    ErrorKind::StateError,
+                    format!("Failed to read failure log: {}", e),
+                )
             })?;
             if let Some(entry) = FailureEntry::parse(&line) {
                 failures.push(entry);
