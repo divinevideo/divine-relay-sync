@@ -10,7 +10,7 @@
   - `--tag TAG:VALUE` to require events have specific tags
   - Config file support for all filtering options
 - **Connection fallback**: Automatically tries ws:// if wss:// fails (and vice versa)
-- **Stale lock detection**: Automatically removes locks from dead processes or locks older than 1 hour
+- **Stale lock detection**: Removes a lock whose local owner process is dead; a lock from another host or with an unreadable owner is kept until it is removed by hand, and run age alone never releases one
 - **Warning counters**: Tracks expired and oversized events separately without log spam
 - Default exclusion of `L:pink.momostr` tagged events (momostr reactions)
 
