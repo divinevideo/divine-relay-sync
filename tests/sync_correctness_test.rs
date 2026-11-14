@@ -28,6 +28,7 @@ struct Behavior {
     negentropy: bool,
     reject_negentropy: bool,
     drift_after_page: bool,
+    auth_reply_noise: bool,
 }
 
 struct Relay {
@@ -173,6 +174,15 @@ impl Relay {
                                 event.verify().unwrap();
                                 assert_eq!(event.kind, Kind::Authentication);
                                 authenticated = true;
+                                if behavior.auth_reply_noise {
+                                    replies.push(json!(["AUTH", "followup-test-challenge"]));
+                                    replies.push(json!([
+                                        "OK",
+                                        "0000000000000000000000000000000000000000000000000000000000000000",
+                                        true,
+                                        ""
+                                    ]));
+                                }
                                 replies.push(json!(["OK", event.id, true, ""]));
                             }
                             Some("EVENT") => {
@@ -475,6 +485,23 @@ async fn dry_run_does_not_checkpoint_and_epoch_events_are_not_skipped() {
 async fn authenticated_timestamp_source_uses_signed_challenge() {
     let source = Relay::start(Behavior {
         require_auth: true,
+        ..Default::default()
+    })
+    .await;
+    let dest = Relay::start(Behavior::default()).await;
+    source.seed(50);
+    let dir = TempDir::new().unwrap();
+    let mut opts = options(&source, &dest);
+    opts.nsec = Some(Keys::generate().secret_key().to_secret_hex());
+    run(opts, &dir).await.unwrap();
+    assert_eq!(dest.events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn auth_reply_is_matched_after_unrelated_messages() {
+    let source = Relay::start(Behavior {
+        require_auth: true,
+        auth_reply_noise: true,
         ..Default::default()
     })
     .await;

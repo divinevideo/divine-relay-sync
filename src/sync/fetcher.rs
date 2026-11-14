@@ -84,9 +84,27 @@ impl Source {
                         })?;
                         let event = self.auth.create_auth_event(&self.url, challenge)?;
                         self.send(&json!(["AUTH", event])).await?;
-                        let reply = self.receive().await?;
-                        if reply[0] != "OK" || reply[1] != event.id.to_hex() || reply[2] != true {
-                            return Err(incomplete("source rejected authentication"));
+                        // The AUTH reply shares this socket with challenges and
+                        // traffic for other subscriptions; accept only the OK
+                        // that names this credential.
+                        let auth_id = event.id.to_hex();
+                        loop {
+                            let reply = self.receive().await?;
+                            if reply[0] == "AUTH" {
+                                if let Some(next) = reply[1].as_str() {
+                                    self.challenge = Some(next.to_owned());
+                                }
+                                continue;
+                            }
+                            if reply[0] == "NOTICE" {
+                                return Err(incomplete("source returned a NOTICE"));
+                            }
+                            if reply[0] == "OK" && reply[1] == auth_id {
+                                if reply[2] != true {
+                                    return Err(incomplete("source rejected authentication"));
+                                }
+                                break;
+                            }
                         }
                         retried_auth = true;
                         self.send(request).await?;
